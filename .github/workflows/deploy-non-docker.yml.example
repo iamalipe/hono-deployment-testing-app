@@ -1,0 +1,66 @@
+name: Backend CI/CD (Non-Docker PM2 / Systemd Deployment)
+
+# NOTE: To use this workflow instead of Docker, rename this file to:
+# .github/workflows/deploy.yml (replacing the Docker workflow)
+
+on:
+  push:
+    branches:
+      - main
+      - release
+  workflow_dispatch:
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build TypeScript
+        run: npm run build
+
+      - name: Deploy to Server via SSH & rsync
+        if: ${{ secrets.SERVER_HOST != '' }}
+        uses: easingthemes/ssh-deploy@v5.1.0
+        with:
+          SSH_PRIVATE_KEY: ${{ secrets.SERVER_SSH_KEY }}
+          ARGS: "-rlgoDzvc -i --delete"
+          SOURCE: "dist/ package.json package-lock.json"
+          REMOTE_HOST: ${{ secrets.SERVER_HOST }}
+          REMOTE_USER: ${{ secrets.SERVER_USER }}
+          REMOTE_PORT: ${{ secrets.SERVER_PORT || 22 }}
+          TARGET: "/var/www/hono-backend"
+          EXCLUDES: "/node_modules/"
+
+      - name: Restart Application via SSH (PM2 or Systemd)
+        if: ${{ secrets.SERVER_HOST != '' }}
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          port: ${{ secrets.SERVER_PORT || 22 }}
+          script: |
+            cd /var/www/hono-backend
+            npm install --omit=dev
+
+            # If using PM2:
+            if command -v pm2 >/dev/null 2>&1; then
+              pm2 restart hono-backend || pm2 start dist/index.js --name hono-backend --env PORT=${{ secrets.APP_PORT || 3000 }}
+              pm2 save
+            # If using systemd:
+            elif systemctl list-unit-files | grep -q hono-backend.service; then
+              sudo systemctl restart hono-backend
+            else
+              echo "Server files deployed. Please configure PM2 or systemd to run 'node dist/index.js'."
+            fi
